@@ -6,7 +6,9 @@ Code worker subprocesses across software projects you've registered,
 mediates blocking decisions between them, and surfaces only what
 actually needs your attention through Discord.
 
-Built to run against a Claude Max subscription — no API spend.
+Runs against your existing Claude subscription (any plan — Pro, Max,
+etc.) — no API spend. Optionally bridges to a ChatGPT subscription
+for Codex worker fallback when Claude budget runs low.
 
 > Status: working personal scaffold. End-to-end flows (project
 > registration, worker spawning, mid-task escalations, scheduled
@@ -31,7 +33,26 @@ missing layer:
   posts heartbeats and asks for direction; you reply when you want to.
 - **Cross-engine routing.** When the Claude 5-hour quota nears its
   warning threshold, new workers are auto-routed to the OpenAI Codex
-  CLI to reserve Claude budget for the orchestrator itself.
+  CLI to reserve Claude budget for the orchestrator itself. Codex is
+  optional — without a ChatGPT subscription, those workers just queue
+  against Claude as usual.
+
+## Requirements
+
+- **Claude subscription.** Any plan — Pro, Max, Team — the daemon
+  doesn't care which. The `claude` CLI must be logged in via OAuth.
+  The daemon refuses to start if `ANTHROPIC_API_KEY` is set;
+  everything bills your subscription, never the API.
+- **A Discord server you control + a bot token** (free). The
+  orchestrator uses Discord as its UI surface; one Discord bot
+  identity is required, a second is optional for separating
+  OM-voiced messages from system metadata.
+- **Python 3.11+** on Linux, WSL, or macOS.
+- **(Optional) ChatGPT subscription** + the `codex` CLI logged in,
+  if you want the Codex worker fallback. The daemon auto-routes
+  spawns to Codex when Claude is in rate-limit pressure, preserving
+  the last bit of Claude budget for the orchestrator itself. Without
+  Codex, the system still works — Claude does all the work.
 
 ## Architecture
 
@@ -127,8 +148,8 @@ pip install -e .
 ### 2. Verify subscription auth
 
 The daemon refuses to start if `ANTHROPIC_API_KEY` is set in the
-environment — that would silently bill the API account instead of the
-Max subscription. Check:
+environment — that would silently bill the API account instead of
+your Claude subscription. Check:
 
 ```bash
 env | grep ANTHROPIC      # should print nothing
@@ -214,42 +235,184 @@ You can ask anytime:
 > Status on my-project.
 > Kill the worker on my-project, I'm taking that direction elsewhere.
 
-Slash commands (any channel, scope inferred from the channel):
+### Multi-modal Discord input
 
-- `/workers` — workers in scope (project channel = that project, main
-  channel = global).
-- `/actions` — open escalations in scope.
+Messages aren't limited to text. The orchestrator handles whatever
+you drop into Discord:
+
+- **Text files** (`.md`, `.py`, `.json`, `.yaml`, `.log`, etc.) —
+  downloaded to `inbox/<message_id>/` and surfaced to the OM as a
+  path it can `Read`. Useful for "here's the spec, build this" or
+  "review this log."
+- **Images** — same flow, plus the OM reads them through Claude
+  Code's native image support. Drag in a screenshot of a UI bug and
+  the orchestrator can route it to a worker for fixing.
+- **Other binary files** — surfaced with a "binary; Read may or may
+  not work" hint so the OM tries appropriately.
+
+### Reply context preserved
+
+Reply to an earlier Discord message and the orchestrator sees the
+quoted content and the original author. Useful for revisiting an
+old escalation ("re: that decision yesterday, do X instead") or
+referring back to a worker's progress update without re-typing it.
+
+### Two-way file delivery
+
+Workers produce real files (reports, screenshots, build artifacts);
+the orchestrator can deliver them straight back over Discord. When a
+worker completes with `artifacts=["/path/to/report.md"]` and you
+asked for the report, the OM auto-uploads it to the project channel.
+Subject to Discord's 10 MiB upload limit and a strict allowlist
+(projects_root, workspace, `/tmp`, registered project roots) plus a
+blocklist for system / credential dirs and sensitive-looking names.
+
+The OM can also `zip_project` to bundle an entire project for
+download.
+
+### Reactions for fast decisions
+
+When the OM needs you to choose between options, it posts an
+escalation with up to 4 numbered reactions (1⃣..4⃣) seeded
+automatically. Tap a reaction; the daemon synthesizes your choice
+back into the OM's event stream as if you'd typed it. No reply
+needed for quick yes/no or multi-choice. Free-form text replies
+still work for anything nuanced.
+
+### Worker progress lives in threads
+
+Every spawned worker gets its own Discord thread off its spawn-ack
+message. Worker status reports — "finished reading, starting
+implementation," "tests green, writing docs," etc. — stream into
+that thread, so the project channel stays clean and you can drill
+into a specific worker's narrative without losing the bigger
+picture.
+
+### Slash commands
+
+Scope-aware: run from a project channel they show that project; run
+from the main channel they show everything.
+
+- `/workers` — active and recent workers, with thread links.
+- `/actions` — open escalations waiting on your input.
 - `/projects` — all registered projects with active worker counts.
 
-## What works / what's stubbed
+Responses are ephemeral, so they don't add channel noise.
 
-Working:
+### Long-running and silent worker recovery
 
-- Config + env loading (with API-key refusal).
-- SQLite schema + DB layer.
-- Priority event bus + Unix-socket IPC.
-- Discord bot (one- or two-bot mode), per-project channel
-  auto-creation, per-worker threads.
-- OM lifecycle: per-event `claude -p` invocation with session resume,
-  compaction (threshold-based and time-based) with summary carry-forward.
-- Worker spawning and monitoring (Claude and Codex).
-- Auto-routing to Codex on Claude rate-limit pressure.
-- All OM-side and worker-side MCP tools routed through the daemon.
-- Escalations to Discord with reaction-resolved options.
-- Stuck-worker sweep, quiet-worker detection, scheduled follow-ups
-  with conditional firing.
-- Worker continuation when a Claude worker hits its `--max-turns`
-  budget mid-task.
+- **Max-turns continuation.** Claude workers that hit their
+  `--max-turns` budget mid-task pause with a structured progress
+  report (`progress_summary`, `what_remains`,
+  `recommended_next_turns`). The OM decides whether to resume them
+  with more turns or move on.
+- **Quiet-worker detection.** If a running worker hasn't called any
+  orchestrator tool in ~12 minutes, the OM gets a `WORKER_QUIET`
+  event with the worker's last 5 tool calls so it can investigate
+  via `tail_worker_output` (which surfaces the actual command
+  arguments and output snippets) before deciding to kill or wait.
+- **Stuck-worker sweep.** Workers idle past `stuck_timeout` are
+  auto-killed.
 
-Stubbed / TODO:
+### Scheduled follow-ups
+
+The OM can schedule its own future events: "in 20 minutes, check on
+worker X if it's still silent." Conditional firing means the
+reminder is silently dropped if circumstances change (e.g. the
+worker is now reporting actively). Schedules survive session
+compaction.
+
+### Reply-dropped safety net
+
+Sometimes the OM does its thinking in assistant text instead of
+calling `reply_to_user`, and you see nothing. The daemon detects
+this — if a turn triggered by your message ends without any
+user-facing tool call, the OM gets a one-shot nudge to recover and
+actually reply.
+
+## What works
+
+### Orchestration
+- Per-event OM invocation with persistent session via `--resume`.
+- Token-threshold session compaction with summary carry-forward,
+  plus a one-shot pre-compaction warning so the OM can persist
+  ephemeral state to durable notes.
+- Time-based session compaction (sessions older than
+  `max_session_hours` roll over).
+- Durable `event_log` table — post-compaction sessions get seeded
+  with the recent log so context isn't fully lost.
+- Scheduled follow-ups (delay or absolute UTC time) with optional
+  conditional firing rules.
+- Reply-dropped detection and self-recovery.
+
+### Discord interaction
+- One- or two-bot mode (separate identities for OM-voiced messages
+  vs system metadata).
+- Per-project channels auto-created under a configured category
+  when a project is registered.
+- Per-worker threads on spawn-ack messages; worker progress streams
+  there; completion and failure also land in the parent channel.
+- Multi-modal input: text, images, and arbitrary attachments
+  downloaded to `inbox/` for the OM to `Read`.
+- Reply-to-message context: replies forward the quoted content +
+  original author to the OM.
+- Outbound text and file delivery, with chunked posts past Discord's
+  ~2 KiB-per-message limit.
+- `zip_project` for full-project archives (delivered as Discord
+  uploads if under 10 MiB).
+- Slash commands `/workers`, `/actions`, `/projects` (scope-aware,
+  ephemeral responses).
+- Reaction-based escalation resolution (1⃣..4⃣ on options).
+
+### Workers
+- Claude and Codex engine support; OM picks per spawn or accepts
+  the Claude default.
+- Auto-routing to Codex when Claude hits the `allowed_warning`
+  rate-limit state, with a 🔀 notice posted to the project channel.
+- Per-project concurrent-worker caps (configurable per project,
+  with a sensible default).
+- Mid-task `send_to_worker` (Claude only — Codex runs ephemeral).
+- Worker continuation when Claude workers hit `--max-turns` (capped
+  at 3 cycles per worker before forced failure).
+- Worker decision requests are mediated by the OM; the OM only
+  bubbles up to you for direction-changing calls.
+- Artifact file delivery on completion, with placeholder-string
+  rejection (workers can't fake a file by writing
+  `"report (inline)"`).
+- Stuck-worker sweep + quiet-worker detection.
+- Engine-aware `tail_worker_output` parses both Claude and Codex
+  stream-json formats.
+
+### Project management
+- YAML-based project registration (auto-loaded from `projects/` at
+  startup).
+- Per-project notes (`om-workspace/notes/<id>.md`) with category +
+  timestamp structure, optional in-place updates for evolving state.
+- Project archival (deletes DB rows + Discord channel; filesystem
+  untouched, so re-registering restores the project fresh).
+- Per-project `CLAUDE.md` loaded into worker and OM context.
+
+### Safety
+- Hard refusal of `ANTHROPIC_API_KEY` at startup.
+- Path validation: `send_file_to_user` enforces an allowlist
+  (`projects_root`, workspace, `/tmp`, registered project roots)
+  and a blocklist (`/etc`, `/proc`, `~/.ssh`, `~/.aws`, `~/.gnupg`)
+  plus filename heuristics (rejects `.env`, `id_rsa`, `credentials`,
+  etc.).
+- 10 MiB Discord upload cap.
+- Workers run with a constrained tool surface (`mcp__orchestrator-
+  worker`, `Bash`, `Read`, `Write`, `Edit`, `Glob`, `Grep`); the OM
+  itself has no Bash/Write/Edit at all — it spawns workers for that.
+
+## Stubbed / TODO
 
 - `send_to_worker` to a Codex worker (Codex runs `--ephemeral`, so
   there's no session to resume — kill + respawn is the workaround).
-- `_compaction_watcher` is an empty loop. Token-threshold compaction
-  works (checked after each turn); a separate time-based watcher
-  doesn't.
-- Graceful shutdown on SIGTERM (flushes in-flight state but doesn't
-  persist OM session checkpoints).
+- The separate time-based compaction watcher loop is empty; the
+  per-tick check inside `_periodic_watcher` does the actual work,
+  so behavior is correct, but the dedicated watcher is unwired.
+- Graceful shutdown on SIGTERM flushes in-flight state but doesn't
+  persist OM session checkpoints.
 
 ## Project layout
 
