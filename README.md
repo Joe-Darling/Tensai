@@ -1,4 +1,4 @@
-# Orchestrator
+# Tensai
 
 A personal multi-agent system that turns Claude Code into a project
 manager. An orchestrator model (the "OM") coordinates a fleet of Claude
