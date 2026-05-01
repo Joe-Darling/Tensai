@@ -1,0 +1,25 @@
+[project]
+name = "orchestrator"
+version = "0.1.0"
+description = "Personal OM + Claude Code workers with Discord PM surface."
+requires-python = ">3.10"
+dependencies = [
+  "discord.py>=2.3",
+  "mcp[cli]>=1.0",          # FastMCP lives here
+  "aiosqlite>=0.19",
+  "pydantic>=2.5",
+  "tomli>=2.0; python_version<'3.11'",
+  "python-dotenv>=1.0",
+  "aiofiles>=23.0",
+  "PyYAML>=6.0",
+]
+
+[project.scripts]
+orchestrator = "daemon.main:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["daemon*"]

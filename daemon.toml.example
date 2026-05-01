@@ -1,0 +1,89 @@
+# Orchestrator daemon config. Copy to daemon.toml and edit.
+# Secrets go in .env, not here.
+
+[user]
+# Your name. Substituted into the OM's behavioral spec
+# (om-workspace/CLAUDE.md, rendered at startup from CLAUDE.md.template)
+# and into runtime preambles so the orchestrator addresses you
+# naturally. Optional — if missing or empty, defaults to "User" and
+# the daemon posts a one-shot Discord notice telling you how to
+# personalize this.
+name = "Friend"
+
+[daemon]
+# Root under which all registered project paths must live (or be
+# symlinked into). Path validation refuses to operate outside this root,
+# which prevents the OM and workers from registering or sending files
+# from arbitrary locations.
+projects_root = "~/claude_projects"
+
+# Daemon workspace: state.db, logs/, workers/, inbox/, om-workspace/
+# all live here.
+workspace = "~/orchestrator"
+
+# Unix socket path for MCP server -> daemon IPC. /tmp is fine on Linux
+# and WSL; pick somewhere writable by the daemon process.
+ipc_socket = "/tmp/orchestrator.sock"
+
+[discord]
+# Right-click a channel in Discord with Developer Mode on to copy IDs.
+
+# The main channel where you talk to the orchestrator (project-less
+# context). Set this to a channel ID you control.
+orchestrator_channel_id = 0
+
+# Optional: Discord category ID under which per-project channels are
+# auto-created when register_project is called. Set to 0 to create
+# channels at the server root.
+projects_category_id = 0
+
+[om]
+# Model for the orchestrator itself. Opus is the default since it
+# coordinates many concurrent workstreams; switch to sonnet if budget
+# is the constraint and you don't mind weaker planning.
+model = "opus"
+
+# Hard compaction threshold: at or above this token count, the next
+# event triggers a forced [COMPACTION_REQUIRED] turn that produces a
+# summary and starts a fresh session.
+max_session_tokens = 120000
+
+# Soft compaction threshold: crossing this fires a one-shot
+# [COMPACTION_IMMINENT] advisory so the OM can write durable notes
+# before context is lost. Defaults to 75% of max_session_tokens if
+# unset.
+compaction_warn_tokens = 90000
+
+# Time-based compaction: sessions older than this compact regardless
+# of token usage. Stops the OM accumulating cruft over multi-day runs.
+max_session_hours = 24
+
+# Path (relative to workspace) of the OM's working dir. CLAUDE.md
+# inside this dir is the OM's behavioral spec; the OM is invoked with
+# this as its cwd.
+workspace_dir = "om-workspace"
+
+[workers]
+# Default model when the OM doesn't specify one.
+default_model = "sonnet"
+
+# Hard cap on concurrent workers across all projects.
+max_concurrent = 6
+
+# Auto-kill a worker that has logged no activity in this many seconds.
+stuck_timeout = 1800
+
+# Surface a WORKER_QUIET event to the OM if a running worker hasn't
+# called any orchestrator tool in this many seconds. Fires once per
+# worker per run. Default 720 (12 min) — give long bash/build commands
+# room without crying wolf.
+quiet_threshold = 720
+
+# Set CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 in worker subprocess env.
+# Required for in-worker parallelism via Agent Teams.
+enable_agent_teams = true
+
+[logging]
+level = "INFO"
+om_turn_log = "logs/om-turns.ndjson"
+daemon_log = "logs/daemon.log"
